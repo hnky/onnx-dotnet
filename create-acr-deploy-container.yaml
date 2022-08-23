@@ -1,0 +1,84 @@
+on:
+  push:
+    branches: [ main ]
+
+
+name: CreateACRDeployContainer
+
+jobs:
+  retrieve-model:
+    runs-on: ubuntu-latest
+    env:
+      AZURE_SUBSCRIPTION: "431dbae5-40ca-438a-8daf-77d7d5580b41"
+      RESOURCE_GROUP: "Cybertron-RG"
+      AML_WORKSPACE: "Cybertron"
+      
+    steps:
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS_AZURE_ML }}
+        allow-no-subscriptions: true
+        
+    - name: Azure CLI script - Deploy Model
+      uses: azure/CLI@v1
+      with:
+        azcliversion: 2.35.0
+        inlineScript: |
+          az extension add -n ml -y
+          az ml model download --name pipeline-simpsons-onnx --version 8 --resource-group $RESOURCE_GROUP --workspace-name $AML_WORKSPACE
+          
+    - uses: actions/upload-artifact@v3
+      with:
+        name: model-${{ github.sha }}
+        path: pipeline-simpsons-onnx/pipeline-simpsons-onnx
+
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    needs: [retrieve-model]
+     
+    steps:
+    - name: Checkout Repository
+      id: checkout_repository
+      uses: actions/checkout@v3
+
+    - uses: actions/download-artifact@v3
+      with:
+        name: model-${{ github.sha }}
+        path: onnxapi/ONNXWebAPI/ONNXModels
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: 'Get Key Vault secrets'
+      uses: Azure/get-keyvault-secrets@v1
+      with: 
+        keyvault: "cmsgskeyvault"
+        secrets: "cmsgcontainerregistry-push-usr, cmsgcontainerregistry-push-pwd"
+      id: myGetSecretAction
+
+    - name: 'Build and push image'
+      uses: azure/docker-login@v1
+      with:
+        login-server: ${{ secrets.ACR_LOGINSERVER }}
+        username: ${{ steps.myGetSecretAction.outputs.cmsgcontainerregistry-push-usr }}
+        password: ${{ steps.myGetSecretAction.outputs.cmsgcontainerregistry-push-pwd }}
+    - run: |
+        cd onnxapi
+        docker build . -t ${{ secrets.ACR_LOGINSERVER }}/onnxapi:${{ github.sha }}
+        docker push ${{ secrets.ACR_LOGINSERVER }}/onnxapi:${{ github.sha }}
+        cd ..
+
+    - name: 'Deploy to Azure Container Instances'
+      uses: 'azure/aci-deploy@v1'
+      with:
+        resource-group: cmsg-rg
+        dns-name-label: cmsg${{ github.run_number }}
+        image: ${{ secrets.ACR_LOGINSERVER }}/onnxapi:${{ github.sha }}
+        registry-login-server: ${{ secrets.ACR_LOGINSERVER }}
+        registry-username: ${{ steps.myGetSecretAction.outputs.cmsgcontainerregistry-push-usr }}
+        registry-password: ${{ steps.myGetSecretAction.outputs.cmsgcontainerregistry-push-pwd }}
+        name: aci-aspnetapp
+        location: 'westeurope'
